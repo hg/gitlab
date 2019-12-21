@@ -1,4 +1,4 @@
-package gitlab
+package main
 
 import (
 	"errors"
@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/requilence/integram"
 	api "github.com/integram-org/gitlab/api"
+	"github.com/requilence/integram"
 	"golang.org/x/oauth2"
 )
 
@@ -243,6 +243,7 @@ type webhook struct {
 	SHA               string  `json:"sha"`
 	BuildID           int     `json:"build_id"`
 	BuildStatus       string  `json:"build_status"`
+	ProjectName       string  `json:"project_name"`
 	BuildName         string  `json:"build_name"`
 	BuildStage        string  `json:"build_stage"`
 	BuildDuration     float32 `json:"build_duration"`
@@ -839,60 +840,52 @@ func webhookHandler(c *integram.Context, request *integram.WebhookContext) (err 
 		// workaround for simultaneously push/build webhooks
 		// todo: replace with job?
 
-		commitMsg, _ := c.FindMessageByEventID(fmt.Sprintf("commit_%s", wh.SHA))
+		suffix := ""
 
-		text := ""
-		commit := ""
-
-		build := m.URL(strings.ToUpper(wh.BuildStage[0:1])+wh.BuildStage[1:], fmt.Sprintf("%s/builds/%d", wh.Repository.Homepage, wh.BuildID))
-
-		if commitMsg == nil {
-			hpURL := strings.Split(wh.Repository.Homepage, "/")
-			username := hpURL[len(hpURL)-2]
-			commit = m.URL("Commit", c.WebPreview("Commit", "@"+wh.SHA[0:10], username+" / "+wh.Repository.Name, wh.Repository.URL+"/commit/"+wh.SHA, "")) + " "
-			build = m.URL(wh.BuildStage, fmt.Sprintf("%s/builds/%d", wh.Repository.Homepage, wh.BuildID))
-		} else {
-			msg.SetReplyToMsgID(commitMsg.MsgID).DisableWebPreview()
+		switch wh.BuildStatus {
+		case "running":
+			suffix = "⚙ выполняется сборка"
+		case "success":
+			suffix = "✅ сборка успешно завершена за " + secondsToString(int(wh.BuildDuration))
+		case "failed":
+			suffix = "‼ сборка прервалась ошибкой через " + secondsToString(int(wh.BuildDuration))
+		case "canceled":
+			suffix = "🔚 сборка отменена пользователем " + wh.User.Name
+		default:
+			return
 		}
 
-		if strings.ToLower(wh.BuildStage) != strings.ToLower(wh.BuildName) {
-			build += " #" + wh.BuildName
-		}
+		text := "[" + wh.ProjectName + "](" + wh.Repository.Homepage + ")  ⇒  `" + wh.BuildStage + "`\n\n"
+		text += "Ветка `" + wh.Ref + "`, коммит `" + wh.SHA[:8] + "` (" + wh.Commit.AuthorName + ")\n"
+		text += "«" + filterMarkdownSpecialChars(wh.Commit.Message) + "»\n\n"
+		text += suffix
 
-		if wh.BuildStatus == "pending" {
-			text = "⏳ CI: " + commit + build + " is pending"
-		} else if wh.BuildStatus == "running" {
-			text = "⚙ CI: " + commit + build + " is running"
-		} else if wh.BuildStatus == "success" {
-			text = fmt.Sprintf("✅ CI: "+commit+build+" succeeded after %.1f sec", wh.BuildDuration)
-		} else if wh.BuildStatus == "failed" {
-			mark := "‼️"
-			suffix := ""
-			if wh.BuildAllowFailure {
-				suffix = " (allowed to fail)"
-				mark = "❕"
-			}
-			text = fmt.Sprintf("%s CI: "+commit+build+" failed after %.1f sec%s", mark, wh.BuildDuration, suffix)
-
-		} else if wh.BuildStatus == "canceled" {
-			text = fmt.Sprintf("🔚 CI: "+commit+build+" canceled by %s after %.1f sec", mention(c, wh.User.Name, ""), wh.BuildDuration)
-		}
-		if commitMsg != nil {
-			var commitMsgText string
-			c.Chat.Cache("commit_"+wh.Commit.SHA, &commitMsgText)
-
-			if commitMsgText != "" {
-				_, err = c.EditMessagesTextWithEventID(commitMsg.EventID[0], commitMsgText+"\n"+text)
-			}
-		}
-
-		cs := chatSettings(c)
-		if cs.CI.Success && (wh.BuildStatus == "success") || cs.CI.Cancel && (wh.BuildStatus == "canceled") || cs.CI.Fail && (wh.BuildStatus == "failed") && !wh.BuildAllowFailure {
-			return msg.SetText(text).
-				EnableHTML().Send()
-		}
+		return msg.SetText(text).
+			EnableMarkdown().
+			DisableWebPreview().
+			Send()
 	}
 	return
+}
+
+var markdownSpecialChars = map[string]string{
+	"[": "(",
+	")": ")",
+	"`": "'",
+	"*": "✱",
+	"_": "‗",
+}
+
+func filterMarkdownSpecialChars(data string) string {
+	data = strings.TrimSpace(data)
+	for from, to := range markdownSpecialChars {
+		data = strings.ReplaceAll(data, from, to)
+	}
+	return data
+}
+
+func secondsToString(seconds int) string {
+	return fmt.Sprintf("%d:%02d", seconds/60, seconds%60)
 }
 
 func boolToMark(b bool) string {
