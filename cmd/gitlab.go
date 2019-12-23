@@ -239,15 +239,16 @@ type snippet struct {
 }
 
 type webhook struct {
-	ObjectKind        string  `json:"object_kind"`
-	SHA               string  `json:"sha"`
-	BuildID           int     `json:"build_id"`
-	BuildStatus       string  `json:"build_status"`
-	ProjectName       string  `json:"project_name"`
-	BuildName         string  `json:"build_name"`
-	BuildStage        string  `json:"build_stage"`
-	BuildDuration     float32 `json:"build_duration"`
-	BuildAllowFailure bool    `json:"build_allow_failure"`
+	ObjectKind         string  `json:"object_kind"`
+	SHA                string  `json:"sha"`
+	BuildID            int     `json:"build_id"`
+	BuildStatus        string  `json:"build_status"`
+	ProjectName        string  `json:"project_name"`
+	BuildName          string  `json:"build_name"`
+	BuildStage         string  `json:"build_stage"`
+	BuildDuration      float32 `json:"build_duration"`
+	BuildAllowFailure  bool    `json:"build_allow_failure"`
+	BuildFailureReason string  `json:"build_failure_reason"`
 
 	Ref              string
 	Before           string
@@ -550,6 +551,35 @@ func snippetReplied(c *integram.Context, baseURL string, projectID int, snippetI
 	return err
 }
 
+var coalescingMsgChan = make(chan *integram.OutgoingMessage, 1000)
+
+func coalescingMsgSender() {
+	var prevMsg *integram.OutgoingMessage
+
+	for {
+		select {
+		case msg := <-coalescingMsgChan:
+			if prevMsg == nil {
+				prevMsg = msg
+			} else {
+				prevMsg.SetText(prevMsg.Text + "\n\n\n" + msg.Text)
+				_ = prevMsg.Send()
+				prevMsg = nil
+			}
+
+		case <-time.After(time.Second * 2):
+			if prevMsg != nil {
+				_ = prevMsg.Send()
+				prevMsg = nil
+			}
+		}
+	}
+}
+
+func init() {
+	go coalescingMsgSender()
+}
+
 func webhookHandler(c *integram.Context, request *integram.WebhookContext) (err error) {
 	wh := &webhook{}
 
@@ -840,17 +870,26 @@ func webhookHandler(c *integram.Context, request *integram.WebhookContext) (err 
 		// workaround for simultaneously push/build webhooks
 		// todo: replace with job?
 
+		if !strings.HasPrefix(wh.ProjectName, "sc-vko") {
+			return
+		}
+
+		stage := "`" + wh.BuildStage + "`"
 		suffix := ""
+		currentHour := time.Now().Hour()
+		silent := currentHour < 8 || currentHour >= 20
 
 		switch wh.BuildStatus {
 		case "running":
-			suffix = "⚙ выполняется сборка"
+			suffix = "⚙ выполняется стадия " + stage
+			silent = true
 		case "success":
-			suffix = "✅ сборка успешно завершена за " + secondsToString(int(wh.BuildDuration))
+			suffix = "✅ " + stage + " успешно завершено за " + secondsToString(int(wh.BuildDuration))
 		case "failed":
-			suffix = "‼ сборка прервалась ошибкой через " + secondsToString(int(wh.BuildDuration))
+			suffix = "‼ " + stage + " прервалось ошибкой `" + wh.BuildFailureReason +
+				"` через " + secondsToString(int(wh.BuildDuration))
 		case "canceled":
-			suffix = "🔚 сборка отменена пользователем " + wh.User.Name
+			suffix = "🔚 " + stage + " отменено пользователем " + wh.User.Name
 		default:
 			return
 		}
@@ -860,10 +899,10 @@ func webhookHandler(c *integram.Context, request *integram.WebhookContext) (err 
 		text += "«" + filterMarkdownSpecialChars(wh.Commit.Message) + "»\n\n"
 		text += suffix
 
-		return msg.SetText(text).
+		coalescingMsgChan <- msg.SetText(text).
+			SetSilent(silent).
 			EnableMarkdown().
-			DisableWebPreview().
-			Send()
+			DisableWebPreview()
 	}
 	return
 }
