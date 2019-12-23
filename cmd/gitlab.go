@@ -567,7 +567,7 @@ func coalescingMsgSender() {
 				prevMsg = nil
 			}
 
-		case <-time.After(time.Second * 2):
+		case <-time.After(time.Second * 6):
 			if prevMsg != nil {
 				_ = prevMsg.Send()
 				prevMsg = nil
