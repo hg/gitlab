@@ -874,6 +874,11 @@ func webhookHandler(c *integram.Context, request *integram.WebhookContext) (err 
 			return
 		}
 
+		// Оповещаем обо всём на production, либо только ошибки в других ветках.
+		if !(wh.Ref == "production" || wh.BuildStatus == "failed") {
+			return
+		}
+
 		stage := "`" + wh.BuildStage + "`"
 		suffix := ""
 		currentHour := time.Now().Hour()
